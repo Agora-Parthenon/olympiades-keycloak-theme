@@ -1,0 +1,123 @@
+name: CI
+on:
+  push:
+  pull_request:
+    branches:
+      - main
+      - develop
+      - staging
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+jobs:
+  build-test:
+    name: Lint, build du thème & tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      # Le dépôt ne contient pas encore de thème : la CI ne fait rien tant
+      # qu'il n'y a pas de package.json, puis s'active toute seule.
+      - name: Détecter le projet Node
+        id: project
+        shell: bash
+        run: |
+          if [ -f package.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Aucun package.json : rien à valider pour l'instant." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Installer Node.js 22
+        if: steps.project.outputs.present == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Installer les dépendances
+        if: steps.project.outputs.present == 'true'
+        run: npm ci
+
+      - name: Vérifier le lint
+        id: lint
+        if: steps.project.outputs.present == 'true'
+        shell: bash
+        run: |
+          set +e
+          npm run lint --if-present > lint-output.txt 2>&1
+          status=$?
+          cat lint-output.txt
+          exit $status
+        continue-on-error: true
+
+      - name: Build du thème
+        id: build
+        if: steps.project.outputs.present == 'true'
+        shell: bash
+        run: |
+          set +e
+          npm run build --if-present > build-output.txt 2>&1
+          status=$?
+          cat build-output.txt
+          exit $status
+        continue-on-error: true
+
+      - name: Lancer les tests
+        id: tests
+        if: steps.project.outputs.present == 'true'
+        shell: bash
+        run: |
+          set +e
+          npm test --if-present > tests-output.txt 2>&1
+          status=$?
+          cat tests-output.txt
+          exit $status
+        continue-on-error: true
+
+      - name: Publier le détail des validations dans le résumé
+        if: always() && steps.project.outputs.present == 'true'
+        shell: bash
+        run: |
+          echo "## Détail des validations" >> "$GITHUB_STEP_SUMMARY"
+          for name in lint build tests; do
+            file="${name}-output.txt"
+            if [ -f "$file" ] && [ -s "$file" ]; then
+              echo "### ${name}" >> "$GITHUB_STEP_SUMMARY"
+              tail -n 100 "$file" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+      - name: Publier les résultats détaillés en artefact
+        if: always() && steps.project.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-details
+          path: |
+            lint-output.txt
+            build-output.txt
+            tests-output.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Échouer le job si le lint a échoué
+        if: steps.lint.outcome == 'failure'
+        run: |
+          echo "Le lint a échoué."
+          exit 1
+
+      - name: Échouer le job si le build a échoué
+        if: steps.build.outcome == 'failure'
+        run: |
+          echo "Le build du thème a échoué."
+          exit 1
+
+      - name: Échouer le job si des tests ont échoué
+        if: steps.tests.outcome == 'failure'
+        run: |
+          echo "Des tests ont échoué."
+          exit 1
